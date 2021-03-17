@@ -8,18 +8,21 @@ using ModelingToolkit
 using DataDrivenDiffEq
 using LinearAlgebra, DiffEqSensitivity, Optim
 using DiffEqFlux, Flux
+using Flux.Losses: logitcrossentropy
 using Plots
 gr()
 using JLD2, FileIO
 using Statistics
+
 # Set a random seed for reproduceable behaviour
 using Random
-Random.seed!(1234)
+Random.seed!(1234)  
 
 # Create a name for saving ( basically a prefix )
 svname = "Scenario_1_"
 
 ## Data generation
+## Lotka-Volterra equation
 function lotka!(du, u, p, t)
     α, β, γ, δ = p
     du[1] = α*u[1] - β*u[2]*u[1]
@@ -42,10 +45,12 @@ x̄ = mean(X, dims = 2)
 noise_magnitude = Float32(5e-2)
 Xₙ = X .+ (noise_magnitude*x̄) .* randn(eltype(X), size(X))
 
+# Plot ideal data with noise
 plot(solution, alpha = 0.75, color = :black, label = ["True Data" nothing])
 scatter!(t, transpose(Xₙ), color = :red, label = ["Noisy Data" nothing])
+
 ## Define the network
-# Gaussian RBF as activation
+# Gaussian RBF as activation function for the NN
 rbf(x) = exp.(-(x.^2))
 
 # Define the network 2->5->5->5->2
@@ -56,6 +61,10 @@ U = FastChain(
 p = initial_params(U)
 
 # Define the hybrid model
+# Model combining the Lotka-Volterra ODE with the NN
+# u -> known equation parameters
+# p -> unknow equation parameters (input of NN)
+# p_true -> ground truth for the unknown parameters
 function ude_dynamics!(du,u, p, t, p_true)
     û = U(u, p) # Network prediction
     du[1] = p_true[1]*u[1] + û[1]
@@ -63,12 +72,20 @@ function ude_dynamics!(du,u, p, t, p_true)
 end
 
 # Closure with the known parameter
-nn_dynamics!(du,u,p,t) = ude_dynamics!(du,u,p,t,p_)
-# Define the problem
+function nn_dynamics!(du,u,p,t)
+    ude_dynamics!(du,u,p,t,p_)
+end
+
+# Define UODE problem with the ODE + the NN (hybrid model)
+# Determine problem for period "tspan" with initial parameters "p"
 prob_nn = ODEProblem(nn_dynamics!,Xₙ[:, 1], tspan, p)
 
 ## Function to train the network
-# Define a predictor
+# Define a predictor:
+# With input parameters θ, input data with noise and 
+# an ideal ground truth solution based on the solved ODE
+#
+#predict() solves the UODE problem
 function predict(θ, X = Xₙ[:,1], T = t)
     Array(solve(prob_nn, Vern7(), u0 = X, p=θ,
                 tspan = (T[1], T[end]), saveat = T,
@@ -77,9 +94,25 @@ function predict(θ, X = Xₙ[:,1], T = t)
                 ))
 end
 
-# Simple L2 loss
+penalty() = sum(abs2, m.W) + sum(abs2, m.b)
+loss(x, y) = logitcrossentropy(m(x), y) + penalty()
+
+
+loss(x, y) = logitcrossentropy(m(x), y) + sum(sqnorm, Flux.params(m))
+
+# Simple L2 loss based on predict method with θ input parameters
+# function loss(θ)
+#     X̂ = predict(θ)
+#     sum(abs2, Xₙ .- X̂)
+# end
+
+
+sqnorm(x) = sum(abs2, x)
+
 function loss(θ)
     X̂ = predict(θ)
+    logitcrossentropy(X̂, Xₙ)
+
     sum(abs2, Xₙ .- X̂)
 end
 
@@ -95,15 +128,15 @@ callback(θ,l) = begin
     false
 end
 
-## Training
+## Training of the UODEs (ODE + NN together)
 
 # First train with ADAM for better convergence -> move the parameters into a
 # favourable starting positing for BFGS
 res1 = DiffEqFlux.sciml_train(loss, p, ADAM(0.1f0), cb=callback, maxiters = 200)
-println("Training loss after $(length(losses)) iterations: $(losses[end])")
+println("Adam: Training loss after $(length(losses)) iterations: $(losses[end])")
 # Train with BFGS
 res2 = DiffEqFlux.sciml_train(loss, res1.minimizer, BFGS(initial_stepnorm=0.01f0), cb=callback, maxiters = 10000)
-println("Final training loss after $(length(losses)) iterations: $(losses[end])")
+println("BFGS: Final training loss after $(length(losses)) iterations: $(losses[end])")
 
 # Plot the losses
 pl_losses = plot(1:200, losses[1:200], yaxis = :log10, xaxis = :log10, xlabel = "Iterations", ylabel = "Loss", label = "ADAM", color = :blue)
@@ -157,7 +190,7 @@ println("SINDy on partial ideal, unavailable data")
 println(Ψ)
 print_equations(Ψ)
 
-# Test on uode derivative data
+# Test on UODE derivative data
 println("SINDy on learned, partial, available data")
 Ψ = SINDy(X̂, Ŷ, basis, λ,  opt, g = g, maxiter = 50000, normalize = true, denoise = true, convergence_error = Float32(1e-10)) # Succeed
 println(Ψ)

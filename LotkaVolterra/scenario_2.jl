@@ -20,11 +20,14 @@ Random.seed!(2345)
 svname = "Scenario_2_"
 
 ## Data generation
+## Lotka-Volterra equation
 function lotka!(du, u, p, t)
+
     α, β, γ, δ = p
     du[1] = α*u[1] - β*u[2]*u[1]
     du[2] = γ*u[1]*u[2]  - δ*u[2]
 end
+
 
 # Define the experimental parameter
 tspan = (0.0f0,6.0f0)
@@ -63,6 +66,7 @@ end
 XS
 
 scatter!(t, transpose(Xₙ))
+
 ## Define the network
 # Gaussian RBF as activation
 rbf(x) = exp.(-(x.^2))
